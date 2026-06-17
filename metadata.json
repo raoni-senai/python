@@ -1,0 +1,6 @@
+{
+  "name": "Python Learner & W3Schools Simulator",
+  "description": "An interactive W3Schools-style Python course with live execution, gamified quizzes, smart AI tutor analysis, progression tracking, and certified milestone completions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
