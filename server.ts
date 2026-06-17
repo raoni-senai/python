@@ -4,6 +4,7 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import fs from "fs";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
@@ -25,6 +26,72 @@ interface StudentProgress {
   completedQuizzes: string[];
   milestonesReached: string[];
   certificateUuid?: string;
+}
+
+// Supabase dynamic setup
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_ANON_KEY;
+const isSupabaseConfigured = !!(supabaseUrl && supabaseKey && supabaseUrl !== "MY_SUPABASE_URL" && supabaseUrl.trim() !== "");
+
+let supabase: any = null;
+if (isSupabaseConfigured) {
+  try {
+    supabase = createClient(supabaseUrl!, supabaseKey!);
+    console.log("Supabase Connection: Initialized successfully!");
+  } catch (err) {
+    console.error("Supabase Connection: Error creating client:", err);
+  }
+} else {
+  console.log("Supabase Connection: Not configured. Running with local JSON fallback (students_db.json).");
+}
+
+/*
+-- INSTRUCTION FOR THE USER (SUPABASE SQL SETUP):
+-- Copy and run the following script inside the Supabase SQL Editor to create your database table:
+
+CREATE TABLE IF NOT EXISTS students_progress (
+  user_id TEXT PRIMARY KEY,
+  username TEXT UNIQUE NOT NULL,
+  xp INTEGER DEFAULT 0 NOT NULL,
+  streak INTEGER DEFAULT 0 NOT NULL,
+  last_active TEXT,
+  completed_lessons TEXT[] DEFAULT '{}'::TEXT[] NOT NULL,
+  completed_quizzes TEXT[] DEFAULT '{}'::TEXT[] NOT NULL,
+  milestones_reached TEXT[] DEFAULT '{}'::TEXT[] NOT NULL,
+  certificate_uuid TEXT
+);
+
+-- Turn on Row Level Security (RLS) or disable/write appropriate policies on table:
+-- ALTER TABLE students_progress ENABLE ROW LEVEL SECURITY;
+-- CREATE POLICY "Enable full access to anon key in server environment" ON students_progress FOR ALL USING (true) WITH CHECK (true);
+*/
+
+function mapToStudentProgress(row: any): StudentProgress {
+  return {
+    userId: row.user_id,
+    username: row.username,
+    xp: typeof row.xp === "number" ? row.xp : Number(row.xp || 0),
+    streak: typeof row.streak === "number" ? row.streak : Number(row.streak || 0),
+    lastActive: row.last_active || null,
+    completedLessons: Array.isArray(row.completed_lessons) ? row.completed_lessons : [],
+    completedQuizzes: Array.isArray(row.completed_quizzes) ? row.completed_quizzes : [],
+    milestonesReached: Array.isArray(row.milestones_reached) ? row.milestones_reached : [],
+    certificateUuid: row.certificate_uuid || undefined
+  };
+}
+
+function mapToDBRow(progress: StudentProgress) {
+  return {
+    user_id: progress.userId,
+    username: progress.username,
+    xp: progress.xp,
+    streak: progress.streak,
+    last_active: progress.lastActive,
+    completed_lessons: progress.completedLessons,
+    completed_quizzes: progress.completedQuizzes,
+    milestones_reached: progress.milestonesReached,
+    certificate_uuid: progress.certificateUuid || null
+  };
 }
 
 const DEFAULT_STUDENTS: StudentProgress[] = [
@@ -84,6 +151,119 @@ function writeStudentsDB(data: StudentProgress[]) {
   }
 }
 
+async function getStudents(): Promise<StudentProgress[]> {
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { data, error } = await supabase
+        .from("students_progress")
+        .select("*");
+      
+      if (error) {
+        if (error.code === "P0001" || error.message?.includes("relation") || error.message?.includes("does not exist")) {
+          console.warn("⚠️ Supabase 'students_progress' table does not exist. Please run the table creation query. Falling back to local students_db.json file!");
+        } else {
+          console.error("Supabase dynamic error fetching students:", error.message || error);
+        }
+        return readStudentsDB();
+      }
+      return (data || []).map(mapToStudentProgress);
+    } catch (err: any) {
+      console.error("Unexpected error querying Supabase, falling back to local database:", err.message || err);
+      return readStudentsDB();
+    }
+  }
+  return readStudentsDB();
+}
+
+async function saveStudentProgress(username: string, progress: any): Promise<{ success: boolean; student: StudentProgress; students: StudentProgress[] }> {
+  const students = await getStudents();
+  const idx = students.findIndex(s => s.username.toUpperCase() === username.toUpperCase());
+  
+  let updatedStudent: StudentProgress;
+  
+  if (idx > -1) {
+    updatedStudent = {
+      ...students[idx],
+      xp: typeof progress.xp === "number" ? progress.xp : students[idx].xp,
+      streak: typeof progress.streak === "number" ? progress.streak : students[idx].streak,
+      lastActive: progress.lastActive || students[idx].lastActive,
+      completedLessons: Array.isArray(progress.completedLessons) ? progress.completedLessons : students[idx].completedLessons,
+      completedQuizzes: Array.isArray(progress.completedQuizzes) ? progress.completedQuizzes : students[idx].completedQuizzes,
+      milestonesReached: Array.isArray(progress.milestonesReached) ? progress.milestonesReached : students[idx].milestonesReached,
+      certificateUuid: progress.certificateUuid || students[idx].certificateUuid
+    };
+    students[idx] = updatedStudent;
+  } else {
+    const isPredefined = DEFAULT_STUDENTS.some(s => s.username.toUpperCase() === username.toUpperCase());
+    const computedUserId = isPredefined 
+      ? `student-${DEFAULT_STUDENTS.findIndex(s => s.username.toUpperCase() === username.toUpperCase()) + 1}`
+      : `dynamic-${username.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
+    
+    updatedStudent = {
+      userId: computedUserId,
+      username: username,
+      xp: progress.xp || 0,
+      streak: progress.streak || 0,
+      lastActive: progress.lastActive || null,
+      completedLessons: progress.completedLessons || [],
+      completedQuizzes: progress.completedQuizzes || [],
+      milestonesReached: progress.milestonesReached || [],
+      certificateUuid: progress.certificateUuid
+    };
+    students.push(updatedStudent);
+  }
+
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const dbRow = mapToDBRow(updatedStudent);
+      const { error } = await supabase
+        .from("students_progress")
+        .upsert(dbRow, { onConflict: "username" });
+      
+      if (error) {
+        console.error("Failed to upsert student to Supabase:", error.message || error);
+        writeStudentsDB(students);
+      }
+    } catch (err: any) {
+      console.error("Unexpected error saving student to Supabase:", err.message || err);
+      writeStudentsDB(students);
+    }
+  } else {
+    writeStudentsDB(students);
+  }
+
+  return { success: true, student: updatedStudent, students };
+}
+
+async function resetStudentsProgress(): Promise<StudentProgress[]> {
+  if (isSupabaseConfigured && supabase) {
+    try {
+      const { error: deleteError } = await supabase
+        .from("students_progress")
+        .delete()
+        .neq("user_id", "");
+      
+      if (deleteError) {
+        console.error("Failed to clear Supabase database on reset:", deleteError.message || deleteError);
+      } else {
+        const seedRows = DEFAULT_STUDENTS.map(mapToDBRow);
+        const { error: seedError } = await supabase
+          .from("students_progress")
+          .insert(seedRows);
+        if (seedError) {
+          console.error("Failed to seed Supabase database on reset:", seedError.message || seedError);
+        } else {
+          console.log("Successfully reset and seeded Supabase database!");
+        }
+      }
+    } catch (err: any) {
+      console.error("Unexpected error resetting Supabase database:", err.message || err);
+    }
+  }
+  writeStudentsDB(DEFAULT_STUDENTS);
+  return DEFAULT_STUDENTS;
+}
+
 // Lazy initialize Gemini client to prevent crashing if the user hasn't loaded keys in UI secrets yet
 let aiClient: GoogleGenAI | null = null;
 function getGeminiClient(): GoogleGenAI | null {
@@ -114,56 +294,24 @@ app.get("/api/health", (req, res) => {
 });
 
 // GET all students
-app.get("/api/students", (req, res) => {
-  const students = readStudentsDB();
+app.get("/api/students", async (req, res) => {
+  const students = await getStudents();
   res.json({ success: true, students });
 });
 
 // UPDATE single student progress
-app.post("/api/students/save", (req, res) => {
+app.post("/api/students/save", async (req, res) => {
   const { username, progress } = req.body;
   if (!username) {
     return res.status(400).json({ success: false, message: "Username parameter is required" });
   }
 
-  const students = readStudentsDB();
-  const idx = students.findIndex(s => s.username.toUpperCase() === username.toUpperCase());
-  
-  if (idx > -1) {
-    // Correctly updating the matching student progress properties
-    students[idx] = {
-      ...students[idx],
-      xp: typeof progress.xp === "number" ? progress.xp : students[idx].xp,
-      streak: typeof progress.streak === "number" ? progress.streak : students[idx].streak,
-      lastActive: progress.lastActive || students[idx].lastActive,
-      completedLessons: Array.isArray(progress.completedLessons) ? progress.completedLessons : students[idx].completedLessons,
-      completedQuizzes: Array.isArray(progress.completedQuizzes) ? progress.completedQuizzes : students[idx].completedQuizzes,
-      milestonesReached: Array.isArray(progress.milestonesReached) ? progress.milestonesReached : students[idx].milestonesReached,
-      certificateUuid: progress.certificateUuid || students[idx].certificateUuid
-    };
-    writeStudentsDB(students);
-    return res.json({ success: true, student: students[idx], students });
-  } else {
-    // If they change their name to something else, register them dynamically
-    const newStudent: StudentProgress = {
-      userId: `dynamic-${Date.now()}`,
-      username: username,
-      xp: progress.xp || 0,
-      streak: progress.streak || 0,
-      lastActive: progress.lastActive || null,
-      completedLessons: progress.completedLessons || [],
-      completedQuizzes: progress.completedQuizzes || [],
-      milestonesReached: progress.milestonesReached || [],
-      certificateUuid: progress.certificateUuid
-    };
-    students.push(newStudent);
-    writeStudentsDB(students);
-    return res.json({ success: true, student: newStudent, students });
-  }
+  const result = await saveStudentProgress(username, progress);
+  res.json(result);
 });
 
 // RESET live leaderboard back to zero (Admin only)
-app.post("/api/students/reset", (req, res) => {
+app.post("/api/students/reset", async (req, res) => {
   const { password } = req.body;
   const validPasswords = ["asus"];
   
@@ -171,8 +319,8 @@ app.post("/api/students/reset", (req, res) => {
     return res.status(403).json({ success: false, message: "Invalid or missing Admin Password." });
   }
   
-  writeStudentsDB(DEFAULT_STUDENTS);
-  res.json({ success: true, students: DEFAULT_STUDENTS });
+  const students = await resetStudentsProgress();
+  res.json({ success: true, students });
 });
 
 // AI Tutor proxy endpoint
