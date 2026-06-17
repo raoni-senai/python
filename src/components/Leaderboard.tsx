@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { UserProgress, LeaderboardUser } from "../types";
 import { translations, Language } from "../data/translations";
 import { Trophy, Flame, Search, Filter, Zap, RefreshCw, Trash2, ShieldAlert } from "lucide-react";
+import { fetchAllStudents, resetLeaderboard } from "../services/dbService";
 
 interface LeaderboardProps {
   progress: UserProgress;
@@ -23,10 +24,9 @@ export default function Leaderboard({ progress, language = "en" }: LeaderboardPr
     if (!silent) setIsLoading(true);
     else setIsRefreshing(true);
     try {
-      const res = await fetch("/api/students");
-      const data = await res.json();
-      if (data.success && Array.isArray(data.students)) {
-        const mapped: LeaderboardUser[] = data.students.map((st: any) => {
+      const data = await fetchAllStudents();
+      if (Array.isArray(data)) {
+        const mapped: LeaderboardUser[] = data.map((st: any) => {
           const xp = typeof st.xp === "number" ? st.xp : 0;
           return {
             username: st.username,
@@ -62,23 +62,14 @@ export default function Leaderboard({ progress, language = "en" }: LeaderboardPr
       return;
     }
     try {
-      const res = await fetch("/api/students/reset", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: adminPasswordInput })
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setShowConfirmReset(false);
-        setAdminPasswordInput("");
-        setResetError("");
-        fetchStudents();
-      } else {
-        setResetError(data.message || "Incorrect Admin Password.");
-      }
+      await resetLeaderboard(adminPasswordInput.trim());
+      setShowConfirmReset(false);
+      setAdminPasswordInput("");
+      setResetError("");
+      fetchStudents();
     } catch (err) {
       console.error("Error resetting class leaderboard:", err);
-      setResetError("Failed to contact host server.");
+      setResetError("Failed to reset database scores.");
     }
   };
 

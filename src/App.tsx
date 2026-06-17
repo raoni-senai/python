@@ -3,6 +3,7 @@ import { UserProgress, CourseSection, Lesson } from "./types";
 import { pythonCourseData } from "./data/lessons";
 import { translations, Language } from "./data/translations";
 import { getTranslatedCourseData } from "./data/lessonTranslations";
+import { fetchAllStudents, saveProgress, resetLeaderboard } from "./services/dbService";
 import Dashboard from "./components/Dashboard";
 import LessonViewer from "./components/LessonViewer";
 import Leaderboard from "./components/Leaderboard";
@@ -157,11 +158,10 @@ export default function App() {
   // Fetch real-time student state from server on username change
   useEffect(() => {
     if (progress.username && progress.username !== "Python Apprentice") {
-      fetch("/api/students")
-        .then(res => res.json())
-        .then(data => {
-          if (data.success && Array.isArray(data.students)) {
-            const serverUser = data.students.find(
+      fetchAllStudents()
+        .then(students => {
+          if (Array.isArray(students)) {
+            const serverUser = students.find(
               (s: any) => s.username.toUpperCase() === progress.username.toUpperCase()
             );
             if (serverUser) {
@@ -188,16 +188,8 @@ export default function App() {
     localStorage.setItem("python_w3_progress", JSON.stringify(progress));
     
     if (progress.username && progress.username !== "Python Apprentice") {
-      fetch("/api/students/save", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          username: progress.username,
-          progress
-        })
-      })
-      .then(res => res.json())
-      .catch(err => console.error("Error syncing progress to server database:", err));
+      saveProgress(progress.username, progress)
+        .catch(err => console.error("Error syncing progress to database database:", err));
     }
   }, [progress]);
 
@@ -964,21 +956,12 @@ export default function App() {
                   }
                   
                   try {
-                    const res = await fetch("/api/students/reset", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ password: pass })
-                    });
-                    const d = await res.json();
-                    if (res.ok && d.success) {
-                      setAdminSuccess(t.instructor_reset_success);
-                      setAdminPasswordInput("");
-                      setTimeout(() => {
-                        setIsAdminOpen(false);
-                      }, 1200);
-                    } else {
-                      setAdminError(d.message || "Leaderboard write permission denied.");
-                    }
+                    await resetLeaderboard(pass);
+                    setAdminSuccess(t.instructor_reset_success);
+                    setAdminPasswordInput("");
+                    setTimeout(() => {
+                      setIsAdminOpen(false);
+                    }, 1200);
                   } catch (e) {
                      setAdminError("Unable to contact database server.");
                   }
